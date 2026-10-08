@@ -997,8 +997,34 @@ $all('.tab').forEach(btn=>{
 
 // ---------- formulario nuevo pedido ----------
 let ultimoPedidoCreado = null;
+// Id reservado para el pedido que se está cargando. Se genera al abrir el formulario y se
+// reutiliza en cada intento de "Publicar": si el primer intento se guardó pero la respuesta
+// no llegó (o el usuario vuelve a tocar el botón), el reintento no puede crear un duplicado.
+let idPedidoEnCurso = null;
+let publicando = false;
+
+function nuevoIdPedido(){
+  if(window.crypto && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c=>{
+    const r = Math.random() * 16 | 0;
+    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+  });
+}
+
+// Busca si un pedido con ese id ya quedó guardado (2 intentos, por si el servidor todavía lo está procesando)
+async function buscarPedidoGuardado(id){
+  for(let intento = 0; intento < 2; intento++){
+    try{
+      const { data } = await supa.from('pedidos').select().eq('id', id).maybeSingle();
+      if(data) return data;
+    }catch(e){ console.warn('No se pudo verificar el pedido', e); }
+    if(intento === 0) await new Promise(r=>setTimeout(r, 1500));
+  }
+  return null;
+}
 
 $('#btnNuevo').addEventListener('click', ()=>{
+  idPedidoEnCurso = nuevoIdPedido();
   $('#formPasos').classList.remove('hidden');
   $('#formExito').classList.add('hidden');
   $('#fTipo').value = 'Boda';
@@ -1060,13 +1086,23 @@ $('#btnPublicar').addEventListener('click', async ()=>{
     mostrarToast('Elegí una fecha y hora de vencimiento futura');
     return;
   }
+  if(publicando) return;
+  if(!idPedidoEnCurso) idPedidoEnCurso = nuevoIdPedido();
+  const idPedido = idPedidoEnCurso;
   const btn = $('#btnPublicar');
+  publicando = true;
   btn.disabled = true; btn.textContent = 'Publicando...';
   try{
-    const { data, error } = await supa.from('pedidos').insert({
-      autor_id: colega.id, tipo_evento, tipo_profesional, vence_en, fecha_evento, horario_presentarse, lugar, descripcion, estado:'abierto'
+    let { data, error } = await supa.from('pedidos').insert({
+      id: idPedido, autor_id: colega.id, tipo_evento, tipo_profesional, vence_en, fecha_evento, horario_presentarse, lugar, descripcion, estado:'abierto'
     }).select().single();
+    if(error){
+      // Si el pedido ya quedó guardado (respuesta perdida o reintento), lo recuperamos en vez de crear otro
+      const existente = await buscarPedidoGuardado(idPedido);
+      if(existente){ data = existente; error = null; }
+    }
     if(error) throw error;
+    idPedidoEnCurso = null; // el próximo pedido usará un id nuevo
     ultimoPedidoCreado = data;
     const url = location.origin + location.pathname + '?pedido=' + data.id;
     const texto = 'Necesito cobertura: ' + tipo_evento + ' - Profesional: ' + tipo_profesional + (fecha_evento ? ' el ' + formatFecha(fecha_evento) : '') + (horario_presentarse ? ' - Presentarse: ' + horario_presentarse : '') + (lugar ? ' en ' + lugar : '') + '. Postulate acá -> ' + url;
@@ -1074,9 +1110,11 @@ $('#btnPublicar').addEventListener('click', async ()=>{
     $('#formPasos').classList.add('hidden');
     $('#formExito').classList.remove('hidden');
   }catch(e){
-    console.error(e);
-    mostrarToast('No se pudo publicar el pedido');
+    console.error('Error al publicar el pedido', e);
+    const detalle = e && e.message ? ' (' + e.message + ')' : '';
+    mostrarToast('No se pudo publicar el pedido' + detalle);
   }finally{
+    publicando = false;
     btn.disabled = false; btn.textContent = 'Publicar';
   }
 });
@@ -1117,13 +1155,3 @@ async function iniciarApp(){
 </script>
 </body>
 </html>
-
-
-
-
-
-
-
-
-
-
